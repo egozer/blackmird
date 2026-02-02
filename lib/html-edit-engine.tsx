@@ -64,21 +64,108 @@ export function applyEdits(html: string, ops: EditOperation[]): string {
   return result
 }
 
+/**
+ * Extracts text content from HTML tags for flexible matching
+ */
+function extractTextContent(html: string): Map<string, number> {
+  const textMap = new Map<string, number>()
+  // Remove tags to get text content
+  const textOnly = html.replace(/<[^>]*>/g, "")
+  // Split into words/phrases
+  const matches = textOnly.match(/[A-Za-z0-9\s]+/g) || []
+  matches.forEach((match) => {
+    const normalized = match.trim().replace(/\s+/g, " ")
+    if (normalized.length > 2) {
+      textMap.set(normalized, (textMap.get(normalized) || 0) + 1)
+    }
+  })
+  return textMap
+}
+
+/**
+ * Finds best matching context for a text replacement
+ * Looks for the target text and surrounding context to ensure unique match
+ */
+function findBestMatch(
+  html: string,
+  target: string,
+  context: { before?: string; after?: string } = {},
+): { index: number; matched: string } | null {
+  // Normalize target
+  const normalized = target.trim().replace(/\s+/g, " ")
+
+  // Try exact match first
+  let index = html.indexOf(target)
+  if (index !== -1 && html.indexOf(target, index + 1) === -1) {
+    return { index, matched: target }
+  }
+
+  // Try normalized match (ignoring whitespace)
+  const htmlLines = html.split(/\n+/)
+  for (let i = 0; i < htmlLines.length; i++) {
+    const line = htmlLines[i]
+    const lineNorm = line.replace(/\s+/g, " ")
+    if (lineNorm.includes(normalized)) {
+      // Found on this line, now find in original
+      const fullMatch = line.match(new RegExp(target.split(/\s+/).join("\\s+"), "i"))
+      if (fullMatch) {
+        const globalIndex = html.indexOf(line) + line.indexOf(fullMatch[0])
+        // Check uniqueness
+        if (html.indexOf(fullMatch[0], globalIndex + 1) === -1) {
+          return { index: globalIndex, matched: fullMatch[0] }
+        }
+      }
+    }
+  }
+
+  // Try partial match with context
+  if (context.before || context.after) {
+    const beforePattern = context.before ? context.before.slice(-20) : ""
+    const afterPattern = context.after ? context.after.slice(0, 20) : ""
+
+    const pattern = new RegExp(
+      `${beforePattern ? beforePattern + ".*?" : ""}${normalized.split(/\s+/).join("\\s+")}${afterPattern ? ".*?" + afterPattern : ""}`,
+      "i",
+    )
+
+    const match = html.match(pattern)
+    if (match) {
+      const globalIndex = html.indexOf(match[0])
+      // Extract just the target part
+      const targetStart = match[0].indexOf(normalized)
+      return { index: globalIndex + targetStart, matched: normalized }
+    }
+  }
+
+  return null
+}
+
 function applyReplace(html: string, target: string, value: string): string {
-  const index = html.indexOf(target)
+  console.log(`[v0] Attempting replace: "${target.substring(0, 40)}..." → "${value.substring(0, 40)}..."`)
 
-  if (index === -1) {
-    console.warn(`[v0] Replace target not found: ${target.substring(0, 50)}...`)
-    return html
+  // Try exact match first
+  let index = html.indexOf(target)
+  if (index !== -1) {
+    // Check uniqueness
+    if (html.indexOf(target, index + 1) === -1) {
+      console.log(`[v0] ✓ Exact match found (unique)`)
+      return html.substring(0, index) + value + html.substring(index + target.length)
+    } else {
+      console.log(`[v0] Exact match found but not unique, trying flexible match...`)
+    }
   }
 
-  // Check for multiple matches - for replace, we require unique target
-  if (html.indexOf(target, index + 1) !== -1) {
-    console.warn(`[v0] Replace target matches multiple locations, skipping: ${target.substring(0, 50)}...`)
-    return html
+  // Try flexible/normalized match
+  const match = findBestMatch(html, target)
+  if (match && match.matched) {
+    console.log(`[v0] ✓ Flexible match found: "${match.matched.substring(0, 40)}..."`)
+    return (
+      html.substring(0, match.index) + value + html.substring(match.index + match.matched.length)
+    )
   }
 
-  return html.substring(0, index) + value + html.substring(index + target.length)
+  console.warn(`[v0] ✗ No match found for: "${target.substring(0, 40)}..."`)
+  return html
 }
 
 /**

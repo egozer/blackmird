@@ -229,64 +229,94 @@ BASKA HICBIR SEY YAZMA. SADECE KOMPLE HTML.`
  */
 
 // MICRO EDIT - ultra fast, minimal changes
-function getMicroEditSystemPrompt(): string {
+function getMicroEditSystemPrompt(htmlContent: string): string {
+  // Extract text content for context
+  const textContent = htmlContent
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .trim()
+    .substring(0, 800)
+
   return `You are an HTML micro-edit engine. Return JSON ONLY.
+
+CRITICAL: Copy target strings EXACTLY from the HTML below.
 
 STRICT RULES:
 - Return ONLY valid JSON, nothing else
-- Maximum 5 operations
+- Maximum 3 operations
 - Make ONLY the exact change requested
 - Do NOT refactor, beautify, or improve anything else
-- Target strings must match EXACTLY
+- Target strings must be copied EXACTLY from the HTML (whitespace matters!)
 - If nothing needs changing, return { "ops": [] }
+
+CURRENT TEXT IN PAGE:
+${textContent}
 
 JSON Schema:
 {
   "ops": [
     {
-      "op": "replace | insert_before | insert_after | delete | set_css",
-      "target": "exact string to find",
+      "op": "replace",
+      "target": "exact string to find (copy from above)",
       "value": "replacement content"
     }
   ]
 }
 
-EXAMPLES:
-- "change Welcome to Hello" → { "ops": [{ "op": "replace", "target": ">Welcome<", "value": ">Hello<" }] }
-- "change price to $99" → { "ops": [{ "op": "replace", "target": ">$49<", "value": ">$99<" }] }`
+EXAMPLE:
+User: "change name to John"
+If page has: "Name: Alice"
+Return: { "ops": [{ "op": "replace", "target": "Alice", "value": "John" }] }`
 }
 
 // SEMANTIC EDIT - language, theme, multi-section changes
-function getSemanticEditSystemPrompt(): string {
+function getSemanticEditSystemPrompt(htmlContent: string): string {
+  // Extract actual text content from HTML to help LLM find targets
+  const textContent = htmlContent
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .trim()
+    .substring(0, 1000)
+
   return `You are an HTML semantic transformation engine. Return JSON ONLY.
+
+CRITICAL: You MUST extract exact text strings from the provided HTML and use them as targets.
 
 STRICT RULES:
 - Return ONLY valid JSON, nothing else
 - Multiple operations allowed for comprehensive changes
-- Large text replacements are permitted
-- Multi-section changes are permitted
-- This is a TRANSFORMATION, not a refactor
-- Do NOT output full HTML
-- Target strings must match EXACTLY in the source
+- Target strings MUST be copied exactly from the HTML (including whitespace, punctuation)
+- Do NOT modify target strings - copy them exactly as they appear
+- If you cannot find an exact match in the HTML, skip that operation
+- Do NOT invent targets or approximate matches
 - If nothing needs changing, return { "ops": [] }
+
+CURRENT PAGE TEXT CONTENT (use these exact strings as targets):
+${textContent}
 
 JSON Schema:
 {
   "ops": [
     {
       "op": "replace | insert_before | insert_after | delete | set_css",
-      "target": "exact string to find",
+      "target": "EXACT string from HTML",
       "value": "replacement content"
     }
   ]
 }
 
-For LANGUAGE changes: Replace all visible text content with translated versions.
-For THEME changes: Use set_css operations to modify colors, backgrounds, etc.
-For MULTI-SECTION changes: Include all necessary operations.
+INSTRUCTIONS:
+1. Look at the text content above - these are the actual strings in the page
+2. For text changes: find the EXACT phrase and replace it
+3. For CSS changes: use set_css with selector and properties
+4. Be precise - copy strings exactly as shown above
+5. If you see formatting/whitespace in the target, preserve it in your target string
 
 Be thorough - include ALL necessary changes to fully complete the transformation.`
 }
+
 
 // ABSTRACT EDIT - converts vague requests to concrete operations
 function getAbstractEditSystemPrompt(abstractRequest: string): string {
@@ -345,12 +375,12 @@ async function editPage(
   
   switch (intent) {
     case "micro":
-      systemMessage = getMicroEditSystemPrompt()
+      systemMessage = getMicroEditSystemPrompt(currentHtml)
       maxTokens = 2000
       temperature = 0.2
       break
     case "semantic":
-      systemMessage = getSemanticEditSystemPrompt()
+      systemMessage = getSemanticEditSystemPrompt(currentHtml)
       maxTokens = 8000
       temperature = 0.4
       break
