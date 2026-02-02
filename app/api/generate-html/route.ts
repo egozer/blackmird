@@ -228,26 +228,53 @@ BASKA HICBIR SEY YAZMA. SADECE KOMPLE HTML.`
  * Automatically routes to the appropriate edit strategy based on intent
  */
 
-// MICRO EDIT - ultra fast, minimal changes
-function getMicroEditSystemPrompt(htmlContent: string): string {
-  // Extract text content for context
-  const textContent = htmlContent
+/**
+ * Extract visible text content from HTML in readable sections
+ * Groups text by context to help LLM identify exact locations
+ */
+function extractPageContent(htmlContent: string): string {
+  // Remove scripts and styles
+  let cleaned = htmlContent
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .trim()
-    .substring(0, 800)
+  
+  const sections: string[] = []
+  
+  // Extract ALL visible text with a simple approach
+  // Strip HTML tags but keep text structure
+  const allText = cleaned
+    .replace(/<[^>]+>/g, "\n") // Replace tags with newlines
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line && line.length > 0)
+    .slice(0, 100) // First 100 lines of text
+  
+  // Show first 50 lines of actual page content
+  sections.push("CURRENT PAGE CONTENT:")
+  allText.forEach((line, i) => {
+    if (i < 50) {
+      sections.push(`${i + 1}. ${line}`)
+    }
+  })
+  
+  return sections.join("\n")
+}
+
+// MICRO EDIT - ultra fast, minimal changes
+function getMicroEditSystemPrompt(htmlContent: string, userRequest: string): string {
+  // Extract text content for context
+  const textContent = extractPageContent(htmlContent)
 
   return `You are an HTML micro-edit engine. Return JSON ONLY.
 
-CRITICAL: Copy target strings EXACTLY from the HTML below.
+CRITICAL: Copy target strings EXACTLY from the CURRENT PAGE TEXT below.
 
 STRICT RULES:
 - Return ONLY valid JSON, nothing else
 - Maximum 3 operations
 - Make ONLY the exact change requested
 - Do NOT refactor, beautify, or improve anything else
-- Target strings must be copied EXACTLY from the HTML (whitespace matters!)
+- Target strings must be copied EXACTLY from the CURRENT PAGE TEXT (whitespace matters!)
 - If nothing needs changing, return { "ops": [] }
 
 CURRENT TEXT IN PAGE:
@@ -264,59 +291,52 @@ JSON Schema:
   ]
 }
 
+USER REQUEST: ${userRequest}
+
 EXAMPLE:
 User: "change name to John"
-If page has: "Name: Alice"
+If page has: "- Alice"
 Return: { "ops": [{ "op": "replace", "target": "Alice", "value": "John" }] }`
 }
 
 // SEMANTIC EDIT - language, theme, multi-section changes
-function getSemanticEditSystemPrompt(htmlContent: string): string {
+function getSemanticEditSystemPrompt(htmlContent: string, userRequest: string): string {
   // Extract actual text content from HTML to help LLM find targets
-  const textContent = htmlContent
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .trim()
-    .substring(0, 1000)
+  const textContent = extractPageContent(htmlContent)
 
   return `You are an HTML semantic transformation engine. Return JSON ONLY.
 
-CRITICAL: You MUST extract exact text strings from the provided HTML and use them as targets.
+CRITICAL: Copy target strings EXACTLY as shown in the text content below. Do not invent or approximate.
 
 STRICT RULES:
 - Return ONLY valid JSON, nothing else
+- COPY text exactly from "CURRENT PAGE TEXT" section below
+- NEVER invent or modify the target string
 - Multiple operations allowed for comprehensive changes
-- Target strings MUST be copied exactly from the HTML (including whitespace, punctuation)
-- Do NOT modify target strings - copy them exactly as they appear
-- If you cannot find an exact match in the HTML, skip that operation
-- Do NOT invent targets or approximate matches
+- Do NOT output full HTML
 - If nothing needs changing, return { "ops": [] }
 
-CURRENT PAGE TEXT CONTENT (use these exact strings as targets):
+CURRENT PAGE TEXT:
 ${textContent}
 
 JSON Schema:
 {
   "ops": [
     {
-      "op": "replace | insert_before | insert_after | delete | set_css",
-      "target": "EXACT string from HTML",
-      "value": "replacement content"
+      "op": "replace",
+      "target": "EXACT text from above section",
+      "value": "new text replacement"
     }
   ]
 }
 
-INSTRUCTIONS:
-1. Look at the text content above - these are the actual strings in the page
-2. For text changes: find the EXACT phrase and replace it
-3. For CSS changes: use set_css with selector and properties
-4. Be precise - copy strings exactly as shown above
-5. If you see formatting/whitespace in the target, preserve it in your target string
-
-Be thorough - include ALL necessary changes to fully complete the transformation.`
+INSTRUCTIONS FOR TEXT REPLACEMENT:
+1. Look at the CURRENT PAGE TEXT section above
+2. Find the EXACT phrase you need to change (copy it character-for-character)
+3. For example, if you see "  - John Smith" in the list, use exactly "  - John Smith" as target
+4. Return the text that should replace it in "value"
+5. If you cannot find exact match in the text content, do NOT guess - return empty ops`
 }
-
 
 // ABSTRACT EDIT - converts vague requests to concrete operations
 function getAbstractEditSystemPrompt(abstractRequest: string): string {
@@ -334,8 +354,6 @@ STRICT RULES:
 - Do NOT explain your changes
 - Make the design feel more "${abstractRequest}"
 - Focus on: colors, spacing, typography, shadows, borders, animations
-- Target strings must match EXACTLY
-- If nothing needs changing, return { "ops": [] }
 
 JSON Schema:
 {
@@ -375,12 +393,12 @@ async function editPage(
   
   switch (intent) {
     case "micro":
-      systemMessage = getMicroEditSystemPrompt(currentHtml)
+      systemMessage = getMicroEditSystemPrompt(currentHtml, lastUserMessage)
       maxTokens = 2000
       temperature = 0.2
       break
     case "semantic":
-      systemMessage = getSemanticEditSystemPrompt(currentHtml)
+      systemMessage = getSemanticEditSystemPrompt(currentHtml, lastUserMessage)
       maxTokens = 8000
       temperature = 0.4
       break
@@ -443,6 +461,8 @@ Return ONLY valid JSON with edit operations.`,
   const data = await response.json()
   let responseContent = data.choices[0].message.content
 
+  console.log(`[v0] LLM Response (first 300 chars): ${responseContent.substring(0, 300)}`)
+
   // Try to extract JSON
   let edits: EditCommandResponse
   try {
@@ -450,19 +470,24 @@ Return ONLY valid JSON with edit operations.`,
     responseContent = responseContent.replace(/```json\n?|\n?```/g, "").trim()
     // Also handle plain code blocks
     responseContent = responseContent.replace(/```\n?|\n?```/g, "").trim()
+    console.log(`[v0] Extracted JSON (first 200 chars): ${responseContent.substring(0, 200)}`)
     edits = JSON.parse(responseContent)
-  } catch {
-    console.error("[v0] Failed to parse edit commands:", responseContent)
+    console.log(`[v0] Parsed edits: ${JSON.stringify(edits).substring(0, 200)}`)
+  } catch (e) {
+    console.error("[v0] Failed to parse edit commands:", responseContent.substring(0, 300))
+    console.error("[v0] Parse error:", e)
     edits = { ops: [] }
   }
 
   if (!isEditCommandResponse(edits)) {
-    console.warn("[v0] Invalid edit command response, returning original HTML")
+    console.warn(`[v0] Invalid edit command response, returning original HTML`)
     return { html: currentHtml, editsApplied: 0, intent }
   }
 
+  console.log(`[v0] Valid edit command with ${edits.ops.length} operations`)
   // STEP 4: Apply edits safely (skip if target not found or multiple matches)
   const modifiedHtml = applyEdits(currentHtml, edits.ops)
+  console.log(`[v0] HTML size before: ${currentHtml.length}, after: ${modifiedHtml.length}`)
   return { html: modifiedHtml, editsApplied: edits.ops.length, intent }
 }
 
@@ -499,11 +524,16 @@ export async function POST(request: NextRequest) {
     if (isInitialGeneration(currentHtml)) {
       console.log("[v0] Mode: GENERATE (initial page)")
       const html = await generatePage(messages, selectedModel, reasoningEnabled, currentHtml)
+      console.log(`[v0] Generated HTML size: ${html.length}`)
       return NextResponse.json({ html, mode: "generate" })
     } else {
       console.log("[v0] Mode: EDIT (apply changes)")
+      console.log(`[v0] Current HTML size: ${currentHtml.length}`)
+      console.log(`[v0] User message: ${userMessage.substring(0, 100)}`)
       const { html, editsApplied, intent } = await editPage(currentHtml, messages, selectedModel, reasoningEnabled)
-      console.log(`[v0] Edit completed - Intent: ${intent}, Operations: ${editsApplied}`)
+      console.log(`[v0] Edit completed - Intent: ${intent}, Operations: ${editsApplied}, New HTML size: ${html.length}`)
+      
+      // IMPORTANT: Return the modified HTML!
       return NextResponse.json({ html, mode: "edit", editsApplied, intent })
     }
   } catch (error) {
