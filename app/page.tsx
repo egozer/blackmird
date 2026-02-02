@@ -141,6 +141,15 @@ export default function Home() {
 
         const data = await response.json()
         const htmlContent = data.html
+        const mode = data.mode
+        const intent = data.intent
+        const editsApplied = data.editsApplied
+
+        // Log intent and operation details
+        if (mode === "edit") {
+          console.log(`[v0] Edit applied - Intent: ${intent}, Operations: ${editsApplied}`)
+        }
+
         const lineCount = htmlContent.split("\n").filter((line: string) => line.trim()).length
 
         if (lineCount === 1) {

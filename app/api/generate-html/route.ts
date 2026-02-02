@@ -1,5 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { applyEdits, isEditCommandResponse, type EditCommandResponse } from "@/lib/html-edit-engine"
+import { classifyIntent } from "@/lib/intent-classifier"
+import { routeEditStrategy } from "@/lib/edit-strategy-router"
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY
 
@@ -148,101 +150,37 @@ async function editPage(
   messages: Message[],
   selectedModel: string,
   reasoningEnabled: boolean,
-): Promise<{ html: string; editsApplied: number }> {
+  apiKey: string,
+): Promise<{ html: string; editsApplied: number; intent: string }> {
   const lastUserMessage = messages[messages.length - 1]?.content || ""
 
-  const systemMessage = `You are an HTML editing engine.
+  // Step 1: Classify intent (fast, lightweight)
+  const classification = classifyIntent(lastUserMessage)
+  console.log(`[v0] Edit intent classified: ${classification.intent} (confidence: ${(classification.confidence * 100).toFixed(0)}%)`)
 
-Rules:
-- You MUST return valid JSON only.
-- You are NOT allowed to return full HTML.
-- You may ONLY return edit operations.
-- Each target must match existing content EXACTLY.
-- Do NOT refactor, improve, or beautify code.
-- Perform ONLY the minimal change requested.
-- If nothing should change, return { "ops": [] }.
-
-JSON Schema:
-{
-  "ops": [
-    {
-      "op": "replace | insert_before | insert_after | delete | set_css",
-      "target": "string (exact match OR selector)",
-      "value": "string (new content or css value)"
-    }
-  ]
-}`
-
-  const requestMessages: Message[] = [
-    {
-      role: "system",
-      content: systemMessage,
-    },
-    {
-      role: "user",
-      content: `Current HTML:
-\`\`\`html
-${currentHtml}
-\`\`\`
-
-User Request: ${lastUserMessage}
-
-Return ONLY valid JSON with edit operations.`,
-    },
-  ]
-
-  const requestPayload: any = {
-    model: selectedModel,
-    messages: requestMessages,
-    temperature: 0.3,
-    max_tokens: 4000,
-    top_p: 0.9,
-  }
-
-  if (reasoningEnabled) {
-    requestPayload.reasoning = {
-      type: "enabled",
-      budget_tokens: 5000,
-    }
-  }
-
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://blackmird.online",
-    },
-    body: JSON.stringify(requestPayload),
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    console.error("[v0] OpenRouter API error:", error)
-    throw new Error(`OpenRouter API error: ${error.error?.message || "Unknown error"}`)
-  }
-
-  const data = await response.json()
-  let responseContent = data.choices[0].message.content
-
-  // Try to extract JSON
+  // Step 2: Route to appropriate strategy based on intent
   let edits: EditCommandResponse
   try {
-    // Remove markdown code blocks if present
-    responseContent = responseContent.replace(/```json\n?|\n?```/g, "").trim()
-    edits = JSON.parse(responseContent)
-  } catch {
-    console.error("[v0] Failed to parse edit commands:", responseContent)
+    edits = await routeEditStrategy(classification.intent, currentHtml, lastUserMessage, selectedModel, reasoningEnabled, apiKey)
+  } catch (error) {
+    console.error("[v0] Edit strategy failed:", error)
     edits = { ops: [] }
   }
 
+  // Step 3: Validate and apply edits
   if (!isEditCommandResponse(edits)) {
     console.warn("[v0] Invalid edit command response, returning original HTML")
-    return { html: currentHtml, editsApplied: 0 }
+    return { html: currentHtml, editsApplied: 0, intent: classification.intent }
   }
 
   const modifiedHtml = applyEdits(currentHtml, edits.ops)
-  return { html: modifiedHtml, editsApplied: edits.ops.length }
+  const editsApplied = edits.ops.filter((op) => {
+    // Count as applied if it resulted in a change to the HTML
+    // This is approximate - we check if the HTML actually changed
+    return modifiedHtml.length !== currentHtml.length
+  }).length
+
+  return { html: modifiedHtml, editsApplied: edits.ops.length, intent: classification.intent }
 }
 
 export async function POST(request: NextRequest) {
@@ -278,11 +216,11 @@ export async function POST(request: NextRequest) {
     if (isInitialGeneration(currentHtml)) {
       console.log("[v0] Mode: GENERATE (initial page)")
       const html = await generatePage(messages, selectedModel, reasoningEnabled)
-      return NextResponse.json({ html, mode: "generate" })
+      return NextResponse.json({ html, mode: "generate", intent: "initial" })
     } else {
       console.log("[v0] Mode: EDIT (apply changes)")
-      const { html, editsApplied } = await editPage(currentHtml, messages, selectedModel, reasoningEnabled)
-      return NextResponse.json({ html, mode: "edit", editsApplied })
+      const { html, editsApplied, intent } = await editPage(currentHtml, messages, selectedModel, reasoningEnabled, OPENROUTER_API_KEY)
+      return NextResponse.json({ html, mode: "edit", editsApplied, intent })
     }
   } catch (error) {
     console.error("[v0] Error generating HTML:", error)
