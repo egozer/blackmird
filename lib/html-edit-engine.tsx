@@ -1,5 +1,5 @@
 export interface EditOperation {
-  op: "replace" | "insert_before" | "insert_after" | "delete" | "set_css"
+  op: "replace" | "insert_before" | "insert_after" | "delete" | "set_css" | "replace_all"
   target: string
   value?: string
 }
@@ -9,19 +9,30 @@ export interface EditCommandResponse {
 }
 
 /**
- * Applies edit operations to HTML string
+ * Applies edit operations to HTML string safely
+ * STEP 4 — APPLY LOGIC:
+ * - Skip operation if target is not found
+ * - Skip if target matches multiple places (for single-match ops)
+ * - Do not partially apply broken edits
  * @param html - Current HTML string
  * @param ops - Array of edit operations
  * @returns Modified HTML string
  */
 export function applyEdits(html: string, ops: EditOperation[]): string {
   let result = html
+  let appliedCount = 0
+  let skippedCount = 0
 
   for (const operation of ops) {
     try {
+      const beforeEdit = result
+      
       switch (operation.op) {
         case "replace":
           result = applyReplace(result, operation.target, operation.value || "")
+          break
+        case "replace_all":
+          result = applyReplaceAll(result, operation.target, operation.value || "")
           break
         case "insert_before":
           result = applyInsertBefore(result, operation.target, operation.value || "")
@@ -36,12 +47,20 @@ export function applyEdits(html: string, ops: EditOperation[]): string {
           result = applySetCss(result, operation.target, operation.value || "")
           break
       }
+      
+      if (result !== beforeEdit) {
+        appliedCount++
+      } else {
+        skippedCount++
+      }
     } catch (error) {
       console.error(`[v0] Edit operation failed (${operation.op}):`, error)
+      skippedCount++
       continue
     }
   }
 
+  console.log(`[v0] Edit results: ${appliedCount} applied, ${skippedCount} skipped`)
   return result
 }
 
@@ -53,13 +72,27 @@ function applyReplace(html: string, target: string, value: string): string {
     return html
   }
 
-  // Check for multiple matches
+  // Check for multiple matches - for replace, we require unique target
   if (html.indexOf(target, index + 1) !== -1) {
     console.warn(`[v0] Replace target matches multiple locations, skipping: ${target.substring(0, 50)}...`)
     return html
   }
 
   return html.substring(0, index) + value + html.substring(index + target.length)
+}
+
+/**
+ * Replace all occurrences of target with value
+ * Used for semantic/language changes where we want to replace all instances
+ */
+function applyReplaceAll(html: string, target: string, value: string): string {
+  if (!html.includes(target)) {
+    console.warn(`[v0] ReplaceAll target not found: ${target.substring(0, 50)}...`)
+    return html
+  }
+  
+  // Use split/join for safe replacement (avoids regex special char issues)
+  return html.split(target).join(value)
 }
 
 function applyInsertBefore(html: string, target: string, value: string): string {
@@ -150,7 +183,7 @@ export function isEditCommandResponse(data: any): data is EditCommandResponse {
   if (!Array.isArray(data.ops)) return false
 
   return data.ops.every((op: any) => {
-    const validOps = ["replace", "insert_before", "insert_after", "delete", "set_css"]
+    const validOps = ["replace", "replace_all", "insert_before", "insert_after", "delete", "set_css"]
     return validOps.includes(op.op) && typeof op.target === "string"
   })
 }

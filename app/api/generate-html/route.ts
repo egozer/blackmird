@@ -1,13 +1,91 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { applyEdits, isEditCommandResponse, type EditCommandResponse } from "@/lib/html-edit-engine"
-import { classifyIntent } from "@/lib/intent-classifier"
-import { routeEditStrategy } from "@/lib/edit-strategy-router"
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY
 
 interface Message {
   role: "system" | "user" | "assistant"
   content: string
+}
+
+type EditIntent = "micro" | "semantic" | "abstract"
+
+/**
+ * STEP 1 — INTENT CLASSIFIER (lightweight, fast)
+ * Classifies user request into one of three intents:
+ * - "micro": small, local, numeric or single-text edits
+ * - "semantic": language changes, theme changes, multi-section edits
+ * - "abstract": vague style requests (e.g. "modern", "premium", "Apple-like")
+ */
+function classifyEditIntent(userMessage: string): EditIntent {
+  const lower = userMessage.toLowerCase().trim()
+  
+  // MICRO patterns - small, local, specific changes
+  const microPatterns = [
+    /change\s+(the\s+)?(text|title|heading|button|link|number|price|date|time|phone|email|address)/i,
+    /replace\s+["']?[^"']+["']?\s+with/i,
+    /set\s+(the\s+)?(text|value|content|title)/i,
+    /update\s+(the\s+)?(text|title|heading|price|number)/i,
+    /make\s+(the\s+)?(text|title|heading|button)\s+(say|read)/i,
+    /fix\s+(the\s+)?(typo|spelling|text)/i,
+    /^\s*["'][^"']+["']\s*(to|->|=>)\s*["'][^"']+["']\s*$/i,
+    /change\s+\d+\s+to\s+\d+/i,
+    /increase|decrease|add|remove|delete\s+(the\s+)?(number|count|quantity)/i,
+  ]
+  
+  // SEMANTIC patterns - language, theme, multi-section changes
+  const semanticPatterns = [
+    /turkish|german|french|spanish|arabic|chinese|japanese|korean|russian|portuguese|italian|dutch|polish|hindi/i,
+    /translate|localize|convert\s+to/i,
+    /(dark|light|night|day)\s*(mode|theme)/i,
+    /change\s+(the\s+)?(language|theme|color\s*scheme|palette)/i,
+    /make\s+(it|everything|all|the\s+page)\s+(dark|light|blue|red|green)/i,
+    /switch\s+to\s+(dark|light|turkish|english)/i,
+    /all\s+(buttons|links|headings|texts|sections)/i,
+    /every\s+(button|link|heading|text|section)/i,
+    /throughout\s+(the\s+)?(page|site|website)/i,
+    /entire\s+(page|site|website)/i,
+  ]
+  
+  // ABSTRACT patterns - vague creative/style requests
+  const abstractPatterns = [
+    /\b(modern|premium|luxury|elegant|sleek|professional|corporate|playful|fun|minimal|clean|bold|striking|sophisticated)\b/i,
+    /apple[\s-]?like|google[\s-]?style|airbnb|stripe|notion|vercel/i,
+    /more\s+(attractive|beautiful|pretty|nice|cool|awesome|stunning|impressive)/i,
+    /look\s+(better|nicer|more\s+professional|more\s+modern)/i,
+    /feel\s+(more\s+)?(premium|luxury|modern|clean)/i,
+    /improve\s+(the\s+)?(design|look|style|aesthetics|visuals)/i,
+    /make\s+it\s+(pop|stand\s+out|shine|sparkle)/i,
+    /redesign|restyle|revamp|refresh|modernize/i,
+    /\bux\b|\bui\b|user\s*experience/i,
+  ]
+  
+  // Check patterns in order of specificity
+  for (const pattern of microPatterns) {
+    if (pattern.test(lower)) {
+      return "micro"
+    }
+  }
+  
+  for (const pattern of semanticPatterns) {
+    if (pattern.test(lower)) {
+      return "semantic"
+    }
+  }
+  
+  for (const pattern of abstractPatterns) {
+    if (pattern.test(lower)) {
+      return "abstract"
+    }
+  }
+  
+  // Default: if message is short and specific, treat as micro; otherwise semantic
+  const wordCount = lower.split(/\s+/).length
+  if (wordCount <= 8) {
+    return "micro"
+  }
+  
+  return "semantic"
 }
 
 function decomposeIntent(userMessage: string): {
@@ -145,42 +223,217 @@ BASKA HICBIR SEY YAZMA. SADECE KOMPLE HTML.`
   return html
 }
 
+/**
+ * STEP 2 — EDIT STRATEGIES
+ * Automatically routes to the appropriate edit strategy based on intent
+ */
+
+// MICRO EDIT - ultra fast, minimal changes
+function getMicroEditSystemPrompt(): string {
+  return `You are an HTML micro-edit engine. Return JSON ONLY.
+
+STRICT RULES:
+- Return ONLY valid JSON, nothing else
+- Maximum 5 operations
+- Make ONLY the exact change requested
+- Do NOT refactor, beautify, or improve anything else
+- Target strings must match EXACTLY
+- If nothing needs changing, return { "ops": [] }
+
+JSON Schema:
+{
+  "ops": [
+    {
+      "op": "replace | insert_before | insert_after | delete | set_css",
+      "target": "exact string to find",
+      "value": "replacement content"
+    }
+  ]
+}
+
+EXAMPLES:
+- "change Welcome to Hello" → { "ops": [{ "op": "replace", "target": ">Welcome<", "value": ">Hello<" }] }
+- "change price to $99" → { "ops": [{ "op": "replace", "target": ">$49<", "value": ">$99<" }] }`
+}
+
+// SEMANTIC EDIT - language, theme, multi-section changes
+function getSemanticEditSystemPrompt(): string {
+  return `You are an HTML semantic transformation engine. Return JSON ONLY.
+
+STRICT RULES:
+- Return ONLY valid JSON, nothing else
+- Multiple operations allowed for comprehensive changes
+- Large text replacements are permitted
+- Multi-section changes are permitted
+- This is a TRANSFORMATION, not a refactor
+- Do NOT output full HTML
+- Target strings must match EXACTLY in the source
+- If nothing needs changing, return { "ops": [] }
+
+JSON Schema:
+{
+  "ops": [
+    {
+      "op": "replace | insert_before | insert_after | delete | set_css",
+      "target": "exact string to find",
+      "value": "replacement content"
+    }
+  ]
+}
+
+For LANGUAGE changes: Replace all visible text content with translated versions.
+For THEME changes: Use set_css operations to modify colors, backgrounds, etc.
+For MULTI-SECTION changes: Include all necessary operations.
+
+Be thorough - include ALL necessary changes to fully complete the transformation.`
+}
+
+// ABSTRACT EDIT - converts vague requests to concrete operations
+function getAbstractEditSystemPrompt(abstractRequest: string): string {
+  return `You are an HTML design transformation engine. Return JSON ONLY.
+
+The user wants: "${abstractRequest}"
+
+PROCESS (internal, do not explain):
+1. Interpret this abstract request into concrete design changes
+2. Generate specific CSS and content operations
+
+STRICT RULES:
+- Return ONLY valid JSON, nothing else
+- Do NOT output full HTML
+- Do NOT explain your changes
+- Make the design feel more "${abstractRequest}"
+- Focus on: colors, spacing, typography, shadows, borders, animations
+- Target strings must match EXACTLY
+- If nothing needs changing, return { "ops": [] }
+
+JSON Schema:
+{
+  "ops": [
+    {
+      "op": "replace | insert_before | insert_after | delete | set_css",
+      "target": "exact string or CSS selector",
+      "value": "replacement content or CSS properties"
+    }
+  ]
+}
+
+Common transformations:
+- "modern" → clean fonts, generous spacing, subtle shadows, rounded corners
+- "premium/luxury" → dark colors, gold accents, elegant typography, smooth animations
+- "minimal" → remove decorations, increase whitespace, simple colors
+- "professional" → structured layout, muted colors, clear hierarchy
+- "playful" → bright colors, rounded shapes, fun animations`
+}
+
 async function editPage(
   currentHtml: string,
   messages: Message[],
   selectedModel: string,
   reasoningEnabled: boolean,
-  apiKey: string,
-): Promise<{ html: string; editsApplied: number; intent: string }> {
+): Promise<{ html: string; editsApplied: number; intent: EditIntent }> {
   const lastUserMessage = messages[messages.length - 1]?.content || ""
+  
+  // STEP 1: Classify intent automatically
+  const intent = classifyEditIntent(lastUserMessage)
+  console.log(`[v0] Edit intent classified as: ${intent}`)
+  
+  // STEP 2: Select appropriate system prompt based on intent
+  let systemMessage: string
+  let maxTokens: number
+  let temperature: number
+  
+  switch (intent) {
+    case "micro":
+      systemMessage = getMicroEditSystemPrompt()
+      maxTokens = 2000
+      temperature = 0.2
+      break
+    case "semantic":
+      systemMessage = getSemanticEditSystemPrompt()
+      maxTokens = 8000
+      temperature = 0.4
+      break
+    case "abstract":
+      systemMessage = getAbstractEditSystemPrompt(lastUserMessage)
+      maxTokens = 8000
+      temperature = 0.5
+      break
+  }
 
-  // Step 1: Classify intent (fast, lightweight)
-  const classification = classifyIntent(lastUserMessage)
-  console.log(`[v0] Edit intent classified: ${classification.intent} (confidence: ${(classification.confidence * 100).toFixed(0)}%)`)
+  const requestMessages: Message[] = [
+    {
+      role: "system",
+      content: systemMessage,
+    },
+    {
+      role: "user",
+      content: `Current HTML:
+\`\`\`html
+${currentHtml}
+\`\`\`
 
-  // Step 2: Route to appropriate strategy based on intent
+User Request: ${lastUserMessage}
+
+Return ONLY valid JSON with edit operations.`,
+    },
+  ]
+
+  const requestPayload: any = {
+    model: selectedModel,
+    messages: requestMessages,
+    temperature,
+    max_tokens: maxTokens,
+    top_p: 0.9,
+  }
+
+  if (reasoningEnabled) {
+    requestPayload.reasoning = {
+      type: "enabled",
+      budget_tokens: intent === "micro" ? 2000 : 5000,
+    }
+  }
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://blackmird.online",
+    },
+    body: JSON.stringify(requestPayload),
+  })
+
+  if (!response.ok) {
+    const error = await response.json()
+    console.error("[v0] OpenRouter API error:", error)
+    throw new Error(`OpenRouter API error: ${error.error?.message || "Unknown error"}`)
+  }
+
+  const data = await response.json()
+  let responseContent = data.choices[0].message.content
+
+  // Try to extract JSON
   let edits: EditCommandResponse
   try {
-    edits = await routeEditStrategy(classification.intent, currentHtml, lastUserMessage, selectedModel, reasoningEnabled, apiKey)
-  } catch (error) {
-    console.error("[v0] Edit strategy failed:", error)
+    // Remove markdown code blocks if present
+    responseContent = responseContent.replace(/```json\n?|\n?```/g, "").trim()
+    // Also handle plain code blocks
+    responseContent = responseContent.replace(/```\n?|\n?```/g, "").trim()
+    edits = JSON.parse(responseContent)
+  } catch {
+    console.error("[v0] Failed to parse edit commands:", responseContent)
     edits = { ops: [] }
   }
 
-  // Step 3: Validate and apply edits
   if (!isEditCommandResponse(edits)) {
     console.warn("[v0] Invalid edit command response, returning original HTML")
-    return { html: currentHtml, editsApplied: 0, intent: classification.intent }
+    return { html: currentHtml, editsApplied: 0, intent }
   }
 
+  // STEP 4: Apply edits safely (skip if target not found or multiple matches)
   const modifiedHtml = applyEdits(currentHtml, edits.ops)
-  const editsApplied = edits.ops.filter((op) => {
-    // Count as applied if it resulted in a change to the HTML
-    // This is approximate - we check if the HTML actually changed
-    return modifiedHtml.length !== currentHtml.length
-  }).length
-
-  return { html: modifiedHtml, editsApplied: edits.ops.length, intent: classification.intent }
+  return { html: modifiedHtml, editsApplied: edits.ops.length, intent }
 }
 
 export async function POST(request: NextRequest) {
@@ -215,11 +468,12 @@ export async function POST(request: NextRequest) {
     // Route to appropriate handler
     if (isInitialGeneration(currentHtml)) {
       console.log("[v0] Mode: GENERATE (initial page)")
-      const html = await generatePage(messages, selectedModel, reasoningEnabled)
-      return NextResponse.json({ html, mode: "generate", intent: "initial" })
+      const html = await generatePage(messages, selectedModel, reasoningEnabled, currentHtml)
+      return NextResponse.json({ html, mode: "generate" })
     } else {
       console.log("[v0] Mode: EDIT (apply changes)")
-      const { html, editsApplied, intent } = await editPage(currentHtml, messages, selectedModel, reasoningEnabled, OPENROUTER_API_KEY)
+      const { html, editsApplied, intent } = await editPage(currentHtml, messages, selectedModel, reasoningEnabled)
+      console.log(`[v0] Edit completed - Intent: ${intent}, Operations: ${editsApplied}`)
       return NextResponse.json({ html, mode: "edit", editsApplied, intent })
     }
   } catch (error) {

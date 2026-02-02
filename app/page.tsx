@@ -141,15 +141,9 @@ export default function Home() {
 
         const data = await response.json()
         const htmlContent = data.html
-        const mode = data.mode
-        const intent = data.intent
-        const editsApplied = data.editsApplied
-
-        // Log intent and operation details
-        if (mode === "edit") {
-          console.log(`[v0] Edit applied - Intent: ${intent}, Operations: ${editsApplied}`)
-        }
-
+        const editMode = data.mode
+        const editIntent = data.intent
+        const editsApplied = data.editsApplied || 0
         const lineCount = htmlContent.split("\n").filter((line: string) => line.trim()).length
 
         if (lineCount === 1) {
@@ -182,12 +176,21 @@ export default function Home() {
         const buildTime = Math.round((endTime - (buildMetrics?.startTime || endTime)) / 1000)
         setBuildMetrics({ startTime: buildMetrics?.startTime || endTime, endTime })
 
+        // Generate appropriate response message based on mode
+        let responseMessage: string
+        if (editMode === "edit") {
+          const intentLabel = editIntent === "micro" ? "Quick edit" : editIntent === "semantic" ? "Semantic update" : editIntent === "abstract" ? "Design transformation" : "Edit"
+          responseMessage = `${intentLabel} complete · ${editsApplied} changes applied · ${buildTime}s`
+        } else {
+          responseMessage = `Built in ${buildTime}s · ${lineCount} lines · Optimized for clarity and performance`
+        }
+
         setMessages((prev) => [
           ...prev,
           {
             id: (Date.now() + 1).toString(),
             role: "assistant",
-            content: `Built in ${buildTime}s · ${lineCount} lines · Optimized for clarity and performance`,
+            content: responseMessage,
           },
         ])
       } catch (error) {
