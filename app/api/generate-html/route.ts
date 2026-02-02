@@ -132,7 +132,6 @@ function isInitialGeneration(currentHtml: string): boolean {
 
 async function generatePage(messages: Message[], selectedModel: string, reasoningEnabled: boolean, currentHtml: string): Promise<string> {
   const intent = decomposeIntent(messages[messages.length - 1]?.content || "")
-  console.log("[v0] Intent decomposition:", intent)
 
   const systemMessage = `Sen elit bir frontend muhendisisin. SADECE tek dosya, production-ready HTML websiteleri uretiyorsun.
 
@@ -173,14 +172,14 @@ BASKA HICBIR SEY YAZMA. SADECE KOMPLE HTML.`
     model: selectedModel,
     messages: requestMessages,
     temperature: 0.7,
-    max_tokens: 65000,
+    max_tokens: 32000,
     top_p: 0.9,
   }
 
   if (reasoningEnabled) {
     requestPayload.reasoning = {
       type: "enabled",
-      budget_tokens: 10000,
+      budget_tokens: 5000,
     }
   }
 
@@ -196,7 +195,6 @@ BASKA HICBIR SEY YAZMA. SADECE KOMPLE HTML.`
 
   if (!response.ok) {
     const error = await response.json()
-    console.error("[v0] OpenRouter API error:", error)
     throw new Error(`OpenRouter API error: ${error.error?.message || "Unknown error"}`)
   }
 
@@ -238,13 +236,18 @@ async function editPage(
   
   // Classify intent for logging/UX
   const intent = classifyEditIntent(lastUserMessage)
-  console.log(`[v0] Edit intent classified as: ${intent}`)
+  
+  // For edits, compress HTML to reduce payload size - keep structure, remove extra whitespace/comments
+  const compressedHtml = currentHtml
+    .replace(/<!--[\s\S]*?-->/g, "") // Remove comments
+    .replace(/\s+/g, " ") // Collapse whitespace
+    .replace(/>\s+</g, "><") // Remove space between tags
   
   // Simple direct approach: have LLM return modified HTML
-  const systemMessage = `You are an HTML editor. The user will give you HTML and ask you to make changes.
+  const systemMessage = `You are an HTML editor. Apply requested changes and return complete modified HTML.
 
 RULES:
-1. Apply the user's requested changes to the HTML
+1. Apply the user's requested changes
 2. Return ONLY the complete modified HTML - nothing else
 3. Keep all existing HTML structure and content you're not changing
 4. Start with <!DOCTYPE html> and end with </html>
@@ -257,15 +260,7 @@ RULES:
     },
     {
       role: "user",
-      content: `Here is the current HTML:
-
-\`\`\`html
-${currentHtml}
-\`\`\`
-
-User request: ${lastUserMessage}
-
-Return the complete modified HTML. Nothing else.`,
+      content: `Current HTML (compressed):\n\`\`\`html\n${compressedHtml.substring(0, 30000)}\n\`\`\`\n\nUser request: ${lastUserMessage}\n\nReturn the complete modified HTML.`,
     },
   ]
 
@@ -273,14 +268,14 @@ Return the complete modified HTML. Nothing else.`,
     model: selectedModel,
     messages: requestMessages,
     temperature: intent === "micro" ? 0.1 : 0.3,
-    max_tokens: 65000,
+    max_tokens: intent === "micro" ? 8000 : 32000,
     top_p: 0.9,
   }
 
-  if (reasoningEnabled) {
+  if (reasoningEnabled && intent !== "micro") {
     requestPayload.reasoning = {
       type: "enabled",
-      budget_tokens: 5000,
+      budget_tokens: 3000,
     }
   }
 
@@ -296,7 +291,6 @@ Return the complete modified HTML. Nothing else.`,
 
   if (!response.ok) {
     const error = await response.json()
-    console.error("[v0] OpenRouter API error:", error)
     throw new Error(`OpenRouter API error: ${error.error?.message || "Unknown error"}`)
   }
 
@@ -314,13 +308,13 @@ Return the complete modified HTML. Nothing else.`,
     }
   }
 
-  // Check if HTML was actually modified
-  const wasModified = modifiedHtml !== currentHtml && modifiedHtml.includes("<!DOCTYPE")
-  const editsApplied = wasModified ? 1 : 0
+  // Validate HTML response
+  if (!modifiedHtml.includes("<!DOCTYPE") || modifiedHtml.length < 100) {
+    throw new Error("Invalid HTML response")
+  }
 
-  console.log(
-    `[v0] Edit completed - Intent: ${intent}, Modified: ${wasModified}, HTML size before: ${currentHtml.length}, after: ${modifiedHtml.length}`,
-  )
+  const wasModified = modifiedHtml !== currentHtml
+  const editsApplied = wasModified ? 1 : 0
 
   return { html: modifiedHtml, editsApplied, intent }
 }

@@ -39,6 +39,8 @@ export default function Home() {
   const [styleProfile, setStyleProfile] = useState<StyleProfile | null>(null)
   const [buildMetrics, setBuildMetrics] = useState<{ startTime: number; endTime: number } | null>(null)
   const [isPublished, setIsPublished] = useState(false)
+  const [currentMessages, setCurrentMessages] = useState([]); // Declare currentMessages
+  const [enhancedMessage, setEnhancedMessage] = useState(""); // Declare enhancedMessage
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -117,16 +119,10 @@ export default function Home() {
       })
 
       try {
-        const currentMessages = [...messages, { role: "user" as const, content: userMessage }]
-        let enhancedMessage = userMessage
-        if (styleProfile && editableHtml) {
-          const styleHints = applyStyleProfile(styleProfile)
-          enhancedMessage = `${userMessage}${styleHints}`
-        }
-
         const response = await fetch("/api/generate-html", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(180000),
           body: JSON.stringify({
             messages: currentMessages,
             currentHtml: editableHtml,
@@ -141,12 +137,17 @@ export default function Home() {
 
         const data = await response.json()
         const htmlContent = data.html
+        
+        if (!htmlContent || !htmlContent.includes("<!DOCTYPE")) {
+          throw new Error("Invalid HTML response")
+        }
+
         const editMode = data.mode
         const editIntent = data.intent
         const editsApplied = data.editsApplied || 0
         const lineCount = htmlContent.split("\n").filter((line: string) => line.trim()).length
 
-        if (lineCount === 1) {
+        if (lineCount < 10) {
           setMessages((prev) => [
             ...prev,
             {
@@ -164,13 +165,13 @@ export default function Home() {
         setGenerationPhase("Finalizing...")
         setShowSkeleton(false)
 
-        await new Promise((resolve) => setTimeout(resolve, 2500))
-
-        const newStyleProfile = extractStyleProfile(htmlContent)
-        setStyleProfile(newStyleProfile)
-
+        // Immediately set HTML to prevent loss
         setGeneratedHtml(htmlContent)
         setEditableHtml(htmlContent)
+
+        // Extract style profile
+        const newStyleProfile = extractStyleProfile(htmlContent)
+        setStyleProfile(newStyleProfile)
 
         const endTime = Date.now()
         const buildTime = Math.round((endTime - (buildMetrics?.startTime || endTime)) / 1000)
@@ -180,9 +181,9 @@ export default function Home() {
         let responseMessage: string
         if (editMode === "edit") {
           const intentLabel = editIntent === "micro" ? "Quick edit" : editIntent === "semantic" ? "Semantic update" : editIntent === "abstract" ? "Design transformation" : "Edit"
-          responseMessage = `${intentLabel} complete · ${editsApplied} changes applied · ${buildTime}s`
+          responseMessage = `${intentLabel} complete · ${buildTime}s`
         } else {
-          responseMessage = `Built in ${buildTime}s · ${lineCount} lines · Optimized for clarity and performance`
+          responseMessage = `Built in ${buildTime}s · ${lineCount} lines`
         }
 
         setMessages((prev) => [
@@ -241,6 +242,8 @@ export default function Home() {
     setCurrentProjectId(Date.now().toString())
     setProjectName(prompt.slice(0, 50) + (prompt.length > 50 ? "..." : ""))
     setShowApp(true)
+    setCurrentMessages([{ id: "system", role: "system", content: "You are an expert HTML developer. Generate clean, production-ready single-file HTML websites. Always include proper styling, responsive design, and semantic HTML." }]); // Initialize currentMessages
+    setEnhancedMessage(prompt); // Initialize enhancedMessage
   }
 
   const handleLoadProject = (project: SavedProject) => {
@@ -256,6 +259,8 @@ export default function Home() {
     setGeneratedHtml(project.html)
     setStyleProfile(project.styleProfile || null)
     setShowApp(true)
+    setCurrentMessages(project.messages); // Set currentMessages from project
+    setEnhancedMessage(""); // Reset enhancedMessage
   }
 
   const handleSaveProject = async (name: string) => {
